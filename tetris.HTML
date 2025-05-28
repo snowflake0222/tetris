@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tetris++</title>
+  <style>
+    *{box-sizing:border-box}
+    body{
+      margin:0;background:#111;color:#fff;
+      display:flex;justify-content:center;align-items:center;
+      height:100vh;font-family:sans-serif
+    }
+    #wrapper{display:flex;gap:24px;align-items:flex-start}
+    canvas{background:#000;border:2px solid #fff}
+    #sidebar{display:flex;flex-direction:column;gap:16px}
+    #score{font-size:24px}
+    #message{font-size:20px;color:#f55;height:24px}
+    #controls{font-size:14px;line-height:1.4}
+    button{
+      padding:10px 16px;font-size:16px;border:none;
+      border-radius:6px;background:#444;color:#fff;cursor:pointer
+    }
+    button:hover{background:#666}
+    #next-wrapper,#hold-wrapper{text-align:center}
+    #next,#hold{margin-top:6px;border:2px solid #888}
+  </style>
+</head>
+<body>
+  <div id="wrapper">
+    <!-- HOLD (왼쪽 상단) -->
+    <div id="hold-wrapper">
+      <div>Hold</div>
+      <canvas id="hold" width="80" height="80"></canvas>
+    </div>
+
+    <!-- 메인 게임 캔버스 -->
+    <canvas id="tetris" width="240" height="400"></canvas>
+
+    <!-- 사이드바 -->
+    <div id="sidebar">
+      <div id="score">Score: 0</div>
+
+      <!-- 다음 블록 프리뷰 -->
+      <div id="next-wrapper">
+        <div>Next</div>
+        <canvas id="next" width="80" height="80"></canvas>
+      </div>
+
+      <!-- 메시지 & 버튼 -->
+      <div id="message"></div>
+      <button onclick="restartGame()">Restart</button>
+
+      <!-- 키 설명 -->
+      <div id="controls">
+        <strong>Controls</strong><br>
+        ← / → : Move<br>
+        ↓ : Soft Drop<br>
+        ↑ : Rotate CW<br>
+        Q : Rotate CCW<br>
+        Space : Hard Drop<br>
+        Shift : Hold Piece
+      </div>
+    </div>
+  </div>
+
+  <!-- 오디오 리소스 (같은 폴더에 파일 두세요) -->
+  <audio id="bgm" src="bgm.mp3" loop></audio>
+  <audio id="sfx-clear" src="clear.wav"></audio>
+  <audio id="sfx-lock" src="lock.wav"></audio>
+  <audio id="sfx-explosion" src="explosion.wav"></audio>
+
+  <script>
+    /* ---------- 캔버스 설정 ---------- */
+    const canvas = document.getElementById('tetris');
+    const ctx = canvas.getContext('2d');
+    ctx.scale(20,20);
+
+    const nextCanvas = document.getElementById('next');
+    const nctx = nextCanvas.getContext('2d');
+    nctx.scale(20,20);
+
+    const holdCanvas = document.getElementById('hold');
+    const hctx = holdCanvas.getContext('2d');
+    hctx.scale(20,20);
+
+    /* ---------- UI 요소 ---------- */
+    const scoreEl = document.getElementById('score');
+    const msgEl   = document.getElementById('message');
+
+    /* ---------- 사운드 ---------- */
+    const bgm = document.getElementById('bgm');
+    const sndClear = document.getElementById('sfx-clear');
+    const sndLock = document.getElementById('sfx-lock');
+    const sndExplosion = document.getElementById('sfx-explosion');
+    let bgmStarted = false;
+
+    /* ---------- 색상 ---------- */
+    const colors = [
+      null,
+      '#FF0D72','#0DC2FF','#0DFF72',
+      '#F538FF','#FF8E0D','#FFE138','#3877FF',
+      '#FFFFFF'  // 폭발 블록
+    ];
+
+    /* ---------- 유틸 ---------- */
+    const createMatrix = (w,h)=>Array.from({length:h},()=>Array(w).fill(0));
+
+    function createPiece(t){
+      switch(t){
+        case 'T': return [[0,1,0],[1,1,1],[0,0,0]];
+        case 'O': return [[2,2],[2,2]];
+        case 'L': return [[0,3,0],[0,3,0],[0,3,3]];
+        case 'J': return [[0,4,0],[0,4,0],[4,4,0]];
+        case 'I': return [[0,5,0,0],[0,5,0,0],[0,5,0,0],[0,5,0,0]];
+        case 'S': return [[0,6,6],[6,6,0],[0,0,0]];
+        case 'Z': return [[7,7,0],[0,7,7],[0,0,0]];
+        case 'B': return [[8]]; // 폭발 블록
+      }
+    }
+
+    function drawMatrix(m,off,c){
+      const context = c || ctx;
+      m.forEach((row,y)=>{
+        row.forEach((val,x)=>{
+          if(val){
+            context.fillStyle = colors[val];
+            context.fillRect(x+off.x,y+off.y,1,1);
+          }
+        });
+      });
+    }
+
+    /* ---------- 게임 상태 ---------- */
+    const arena = createMatrix(12,20);
+    const player = {pos:{x:0,y:0},matrix:null,score:0};
+    let nextPiece = null;
+    let holdPiece = null;
+    let holdUsed = false;
+
+    /* ---------- 폭발 ---------- */
+    function explodeAt(x,y){
+      for(let dy=-1;dy<=1;dy++){
+        for(let dx=-1;dx<=1;dx++){
+          const ay=y+dy, ax=x+dx;
+          if(ay>=0 && ay<arena.length && ax>=0 && ax<arena[0].length){
+            arena[ay][ax]=0;
+          }
+        }
+      }
+      sndExplosion.currentTime = 0;
+      sndExplosion.play();
+    }
+
+    /* ---------- 충돌/합치기/줄 삭제 ---------- */
+    function collide(arena,pl){
+      const[m,o]=[pl.matrix,pl.pos];
+      for(let y=0;y<m.length;y++){
+        for(let x=0;x<m[y].length;x++){
+          if(m[y][x] && (arena[y+o.y] && arena[y+o.y][x+o.x])!==0) return true;
+        }
+      }
+      return false;
+    }
+
+    function merge(arena,pl){
+      const bombs=[];
+      pl.matrix.forEach((row,y)=>{
+        row.forEach((val,x)=>{
+          if(val){
+            const ay=y+pl.pos.y, ax=x+pl.pos.x;
+            arena[ay][ax]=val;
+            if(val===8) bombs.push([ax,ay]);
+          }
+        });
+      });
+      bombs.forEach(([bx,by])=>explodeAt(bx,by));
+      sndLock.currentTime=0; sndLock.play();
+    }
+
+    function arenaSweep(){
+      let rowCount=1, cleared=false;
+      outer:for(let y=arena.length-1;y>=0;--y){
+        for(let x=0;x<arena[y].length;x++){
+          if(arena[y][x]===0) continue outer;
+        }
+        const row=arena.splice(y,1)[0].fill(0);
+        arena.unshift(row);++y;
+        player.score+=rowCount*10; rowCount*=2; cleared=true;
+      }
+      if(cleared){ sndClear.currentTime=0; sndClear.play(); }
+    }
+
+    /* ---------- 그리기 ---------- */
+    function draw(){
+      ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+      drawMatrix(arena,{x:0,y:0});
+      drawMatrix(player.matrix,player.pos);
+    }
+
+    function drawNext(){
+      nctx.fillStyle='#000'; nctx.fillRect(0,0,nextCanvas.width,nextCanvas.height);
+      const offX=Math.floor((4-nextPiece[0].length)/2);
+      const offY=Math.floor((4-nextPiece.length)/2);
+      drawMatrix(nextPiece,{x:offX,y:offY},nctx);
+    }
+
+    function drawHold(){
+      hctx.fillStyle='#000'; hctx.fillRect(0,0,holdCanvas.width,holdCanvas.height);
+      if(!holdPiece) return;
+      const offX=Math.floor((4-holdPiece[0].length)/2);
+      const offY=Math.floor((4-holdPiece.length)/2);
+      drawMatrix(holdPiece,{x:offX,y:offY},hctx);
+    }
+
+    /* ---------- 회전 ---------- */
+    function rotate(m,dir){
+      for(let y=0;y<m.length;y++){
+        for(let x=0;x<y;x++){
+          [m[x][y],m[y][x]]=[m[y][x],m[x][y]];
+        }
+      }
+      dir>0 ? m.forEach(r=>r.reverse()) : m.reverse();
+    }
+
+    /* ---------- 랜덤 블록 ---------- */
+    function randomPiece(){
+      const base='TJLOSZI';
+      return Math.random()<0.1 ? 'B' : base[Math.random()*base.length|0];
+    }
+
+    /* ---------- 플레이어 동작 ---------- */
+    function updateScore(){ scoreEl.textContent='Score: '+player.score; }
+
+    function playerReset(){
+      player.matrix = nextPiece || createPiece(randomPiece());
+      nextPiece = createPiece(randomPiece());
+      drawNext();
+      player.pos.y=0;
+      player.pos.x=(arena[0].length>>1)-(player.matrix[0].length>>1);
+      if(collide(arena,player)){
+        msgEl.textContent='Game Over!';
+        arena.forEach(r=>r.fill(0)); player.score=0;
+      }else msgEl.textContent='';
+      holdUsed=false;
+      drawHold();
+      updateScore();
+    }
+
+    let landed=false, lockTimer=0, lockDelay=500;
+
+    function playerMove(dir){
+      player.pos.x+=dir;
+      if(collide(arena,player)) player.pos.x-=dir;
+      else { landed=false; lockTimer=0; }
+    }
+
+    function playerDrop(){
+      player.pos.y++;
+      if(collide(arena,player)){
+        player.pos.y--; landed=true; // 접지됨
+        lockTimer=0;
+      } else {
+        landed=false;
+      }
+      dropCounter=0;
+    }
+
+    function playerRotate(dir){
+      const pos=player.pos.x; let offset=1;
+      rotate(player.matrix,dir);
+      while(collide(arena,player)){
+        player.pos.x+=offset;
+        offset=-(offset+(offset>0?1:-1));
+        if(offset>player.matrix[0].length){ rotate(player.matrix,-dir); player.pos.x=pos; return; }
+      }
+      landed=false; lockTimer=0;
+    }
+
+    function hardDrop(){
+      while(!collide(arena,player)) player.pos.y++;
+      player.pos.y--;
+      merge(arena,player);
+      arenaSweep();
+      playerReset();
+    }
+
+    function holdAction(){
+      if(holdUsed) return;
+      if(!holdPiece){
+        holdPiece = player.matrix;
+        player.matrix = nextPiece;
+        nextPiece = createPiece(randomPiece());
+      }else{
+        [player.matrix, holdPiece] = [holdPiece, player.matrix];
+      }
+      holdUsed=true; drawHold();
+      player.pos.y=0;
+      player.pos.x=(arena[0].length>>1)-(player.matrix[0].length>>1);
+    }
+
+    /* ---------- 루프 ---------- */
+    let dropCounter=0, dropInterval=1000;
+    let lastTime=0;
+    function update(time=0){
+      const dt=time-lastTime; lastTime=time;
+      dropCounter+=dt;
+      if(dropCounter>dropInterval) playerDrop();
+      if(landed){ lockTimer+=dt; if(lockTimer>lockDelay){ merge(arena,player); arenaSweep(); playerReset(); landed=false; } }
+      draw();
+      requestAnimationFrame(update);
+    }
+
+    /* ---------- 입력 ---------- */
+    document.addEventListener('keydown',e=>{
+      if(!bgmStarted){ bgm.play(); bgmStarted=true; }
+      switch(e.key){
+        case 'ArrowLeft': playerMove(-1); break;
+        case 'ArrowRight': playerMove(1); break;
+        case 'ArrowDown': playerDrop(); break;
+        case 'ArrowUp': playerRotate(1); break;
+        case 'q': case 'Q': playerRotate(-1); break;
+        case ' ': hardDrop(); break;
+        case 'Shift': holdAction(); break;
+      }
+    });
+
+    /* ---------- 재시작 ---------- */
+    function restartGame(){ msgEl.textContent=''; player.score=0; arena.forEach(r=>r.fill(0)); holdPiece=null; nextPiece=createPiece(randomPiece()); playerReset(); }
+
+    /* ---------- 시작 ---------- */
+    nextPiece=createPiece(randomPiece());
+    playerReset();
+    update();
+  </script>
+</body>
+</html>
